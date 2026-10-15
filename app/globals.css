@@ -1,0 +1,131 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+  Paleta Alcázar — marfil, tinta cálida y champán.
+  ivory     #F7F3EC  fondo principal
+  sand      #EDE5D8  superficies alternas
+  linen     #E2D6C4  bordes suaves / bloques
+  ink       #15120F  texto principal / fondos oscuros
+  espresso  #221C17  superficies oscuras
+  taupe     #6B6158  texto secundario (5.6:1 sobre ivory)
+  bronze    #7C5E37  acento sobre fondos claros (5.4:1 sobre ivory)
+  champagne #CDB38A  acento sobre fondos oscuros (9.4:1 sobre ink)
+*/
+@theme inline {
+  --font-sans: var(--font-jost);
+  --font-serif: var(--font-cormorant);
+
+  --color-ivory: #f7f3ec;
+  --color-sand: #ede5d8;
+  --color-linen: #e2d6c4;
+  --color-ink: #15120f;
+  --color-espresso: #221c17;
+  --color-taupe: #6b6158;
+  --color-bronze: #7c5e37;
+  --color-champagne: #cdb38a;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-border: var(--border);
+  --color-ring: var(--ring);
+
+  --ease-luxe: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --animate-marquee: marquee 48s linear infinite;
+  --animate-kenburns: kenburns 18s ease-out both;
+  --animate-scroll-cue: scroll-cue 2.4s var(--ease-luxe) infinite;
+  --animate-progress: progress linear forwards;
+}
+
+:root {
+  color-scheme: light;
+  --background: #f7f3ec;
+  --foreground: #15120f;
+  --border: rgb(21 18 15 / 0.12);
+  --ring: #7c5e37;
+}
+
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+@keyframes kenburns {
+  from { transform: scale(1.08); }
+  to { transform: scale(1); }
+}
+@keyframes scroll-cue {
+  0% { transform: scaleY(0); transform-origin: top; }
+  45% { transform: scaleY(1); transform-origin: top; }
+  55% { transform: scaleY(1); transform-origin: bottom; }
+  100% { transform: scaleY(0); transform-origin: bottom; }
+}
+@keyframes progress {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(110%); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 6rem; }
+body {
+  margin: 0;
+  background: var(--color-ivory);
+  color: var(--color-ink);
+  font-family: var(--font-jost), 'Helvetica Neue', Arial, sans-serif;
+  font-weight: 350;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: var(--color-champagne); color: var(--color-ink); }
+.font-serif { font-family: var(--font-cormorant), Georgia, serif; font-feature-settings: 'liga', 'dlig'; }
+
+/* Revelado al hacer scroll (ver components/site/reveal.tsx) */
+.reveal {
+  opacity: 0;
+  transform: translate3d(0, 28px, 0);
+  filter: blur(6px);
+  transition: opacity 1.1s var(--ease-luxe), transform 1.1s var(--ease-luxe), filter 1.1s var(--ease-luxe);
+  transition-delay: var(--reveal-delay, 0ms);
+}
+.reveal[data-visible='true'] { opacity: 1; transform: none; filter: none; }
+
+/* Titulares que suben línea por línea */
+.line-mask { display: block; overflow: hidden; padding-bottom: 0.08em; }
+.line-mask > span { display: block; animation: rise 1.3s var(--ease-luxe) both; animation-delay: var(--line-delay, 0ms); }
+
+/* Enlace con subrayado animado */
+.link-luxe { background: linear-gradient(currentColor, currentColor) 0 100% / 0 1px no-repeat; transition: background-size 0.6s var(--ease-luxe); }
+.link-luxe:hover, .link-luxe:focus-visible { background-size: 100% 1px; }
+
+/* Grano sutil sobre los videos */
+.grain::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.07;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  .reveal { opacity: 1; transform: none; filter: none; }
+}
+
+@layer base {
+  button, input, select, textarea { font: inherit; }
+  button { cursor: pointer; }
+  * { @apply border-border outline-ring/50; }
+  :focus-visible { outline: 1px solid var(--color-bronze); outline-offset: 4px; }
+}
