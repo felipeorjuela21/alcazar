@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { ArrowUp, CalendarCheck, Sparkles, X } from 'lucide-react'
-import type { AssistantReply, ChatTurn } from '@/lib/assistant'
+import type { AssistantEvent, Booking, ChatTurn } from '@/lib/assistant'
 import { cn } from '@/lib/utils'
 import { WhatsappIcon } from './icons'
 
-type Message = ChatTurn & { booking?: AssistantReply['booking'] }
+type Message = ChatTurn & { booking?: Booking }
 
 const OPEN_EVENT = 'alcazar:open-assistant'
 
@@ -68,16 +68,35 @@ export function Assistant() {
     setMessages(history)
     setInput('')
     setLoading(true)
+    let reply: Message | null = null
+    // Agrega la respuesta con el primer evento y la va completando a medida que llega el texto.
+    const apply = (event: AssistantEvent) => {
+      const base: Message = reply ?? { role: 'assistant', text: '' }
+      const next: Message = event.type === 'text' ? { ...base, text: base.text + event.text } : { ...base, booking: event.booking }
+      const isNew = reply === null
+      reply = next
+      setMessages((current) => (isNew ? [...current, next] : [...current.slice(0, -1), next]))
+    }
     try {
       const response = await fetch('/api/asistente', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: history.slice(1).map(({ role, text }) => ({ role, text })) }),
       })
-      if (!response.ok) throw new Error(String(response.status))
-      const data = (await response.json()) as AssistantReply
-      setMessages((current) => [...current, { role: 'assistant', text: data.reply, booking: data.booking }])
+      if (!response.ok || !response.body) throw new Error(String(response.status))
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
+      let buffer = ''
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += value
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) if (line.trim()) apply(JSON.parse(line) as AssistantEvent)
+      }
+      if (!reply) throw new Error('Respuesta vacía')
     } catch {
+      if (reply) return
       setMessages((current) => [...current, { role: 'assistant', text: 'No pude conectarme en este momento. Puedes escribirnos por WhatsApp y te atendemos personalmente.' }])
     } finally {
       setLoading(false)
@@ -169,7 +188,7 @@ export function Assistant() {
             </div>
           ))}
 
-          {loading && (
+          {loading && messages[messages.length - 1]?.role === 'user' && (
             <div className="flex items-center gap-1.5 border border-ink/10 bg-white/70 px-5 py-4 w-fit" aria-label="El asistente está escribiendo">
               {[0, 150, 300].map((delay) => <span key={delay} className="h-1.5 w-1.5 animate-bounce rounded-full bg-bronze/70" style={{ animationDelay: `${delay}ms` }} />)}
             </div>

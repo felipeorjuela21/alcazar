@@ -1,9 +1,11 @@
-import { ApiError, GoogleGenAI, type Content, type FunctionDeclaration } from '@google/genai'
+import { ApiError, GoogleGenAI, ThinkingLevel, type Content, type FunctionCall, type FunctionDeclaration, type GenerateContentConfig, type GenerateContentResponse, type Part } from '@google/genai'
 import { NextResponse } from 'next/server'
-import { bookingWhatsapp, buildSystemPrompt, localAnswer, type AssistantReply, type BookingRequest, type ChatTurn } from '@/lib/assistant'
+import { BOOKING_CONFIRMATION, bookingWhatsapp, buildSystemPrompt, localAnswer, type AssistantEvent, type BookingRequest, type ChatTurn } from '@/lib/assistant'
 import { doctors, procedureGroups } from '@/lib/content'
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-latest'
+// Flash-Lite con razonamiento mínimo responde en ~1 s; Flash queda como alterno si Lite está saturado.
+const MODELS = [...new Set([process.env.GEMINI_MODEL || 'gemini-flash-lite-latest', 'gemini-flash-latest'])]
+const REQUEST_TIMEOUT_MS = 12_000 // la API exige al menos 10 s
 const MAX_TURNS = 16
 const MAX_CHARS = 1200
 
@@ -49,13 +51,25 @@ function parseTurns(body: unknown): ChatTurn[] | null {
   return turns.length && turns[turns.length - 1].role === 'user' ? turns : null
 }
 
-function validateBooking(args: Record<string, unknown> | undefined): BookingRequest | string {
+// Solo se acepta un especialista real que el paciente haya nombrado; se guarda con su nombre oficial.
+function matchDoctor(value: string, patientText: string) {
+  const normalize = (input: string) => input.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  const wanted = normalize(value)
+  const said = normalize(patientText)
+  if (!wanted) return undefined
+  return doctors.find((doctor) => {
+    const surnames = normalize(doctor.name).replace(/^(dra?\.)\s*/, '').split(' ').slice(1)
+    return surnames.some((surname) => surname.length > 3 && wanted.includes(surname) && said.includes(surname))
+  })?.name
+}
+
+function validateBooking(args: Record<string, unknown> | undefined, patientText: string): BookingRequest | string {
   const text = (key: string, max = 160) => (typeof args?.[key] === 'string' ? (args[key] as string).trim().slice(0, max) : '')
   const booking: BookingRequest = {
     nombre: text('nombre', 80),
     telefono: text('telefono', 30),
     procedimiento: text('procedimiento', 80),
-    especialista: text('especialista', 80) || undefined,
+    especialista: matchDoctor(text('especialista', 80), patientText),
     fecha_preferida: text('fecha_preferida', 120) || undefined,
     comentarios: text('comentarios', 300) || undefined,
   }
@@ -65,8 +79,65 @@ function validateBooking(args: Record<string, unknown> | undefined): BookingRequ
   return booking
 }
 
+// Sin reintentos del SDK (esperan hasta un minuto): si un modelo falla por saturación, se pasa al siguiente.
+async function openStream(ai: GoogleGenAI, contents: Content[], config: GenerateContentConfig, preferred?: string) {
+  const order = preferred ? [preferred, ...MODELS.filter((model) => model !== preferred)] : MODELS
+  let lastError: unknown
+  for (const model of order) {
+    try {
+      const stream = await ai.models.generateContentStream({
+        model,
+        contents,
+        config: {
+          ...config,
+          ...(model.includes('lite') && { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } }),
+          httpOptions: { timeout: REQUEST_TIMEOUT_MS, retryOptions: { attempts: 1 } },
+        },
+      })
+      return { stream, model }
+    } catch (error) {
+      lastError = error
+      const retryable = !(error instanceof ApiError) || error.status === 429 || error.status >= 500
+      console.warn('[asistente]', model, error instanceof ApiError ? error.status : (error as Error).message)
+      if (!retryable) break
+    }
+  }
+  throw lastError
+}
+
+// Reenvía el texto al navegador a medida que llega y detecta si el modelo pidió registrar la cita.
+async function relay(stream: AsyncGenerator<GenerateContentResponse>, emit: (event: AssistantEvent) => void) {
+  const parts: Part[] = []
+  let call: FunctionCall | undefined
+  let wrote = false
+  for await (const chunk of stream) {
+    for (const part of chunk.candidates?.[0]?.content?.parts ?? []) {
+      parts.push(part)
+      if (part.functionCall?.name === bookingTool.name) call = part.functionCall
+      const text = part.thought ? '' : (part.text ?? '').replace(/\*/g, '')
+      if (text) {
+        emit({ type: 'text', text })
+        wrote = true
+      }
+    }
+  }
+  return { parts, call, wrote }
+}
+
 function today() {
   return new Intl.DateTimeFormat('es-CO', { dateStyle: 'full', timeZone: 'America/Bogota' }).format(new Date())
+}
+
+const encoder = new TextEncoder()
+
+function eventStream(run: (emit: (event: AssistantEvent) => void) => Promise<void>) {
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      await run((event) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)))
+      controller.close()
+    },
+  })
+  return new Response(body, { headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache, no-transform' } })
 }
 
 export async function POST(request: Request) {
@@ -78,53 +149,47 @@ export async function POST(request: Request) {
   const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'local'
 
   if (!apiKey || rateLimited(ip)) {
-    return NextResponse.json<AssistantReply>({ reply: localAnswer(lastQuestion), fallback: true })
+    return eventStream(async (emit) => emit({ type: 'text', text: localAnswer(lastQuestion) }))
   }
 
   const ai = new GoogleGenAI({ apiKey })
   const contents: Content[] = turns.map((turn) => ({ role: turn.role === 'user' ? 'user' : 'model', parts: [{ text: turn.text }] }))
-  const config = {
+  const config: GenerateContentConfig = {
     systemInstruction: buildSystemPrompt(today()),
     tools: [{ functionDeclarations: [bookingTool] }],
     temperature: 0.4,
     maxOutputTokens: 1024,
   }
 
-  try {
-    let booking: AssistantReply['booking']
+  return eventStream(async (emit) => {
+    let wrote = false
+    try {
+      const { stream, model } = await openStream(ai, contents, config)
+      const round = await relay(stream, emit)
+      wrote = round.wrote
 
-    // Como máximo dos rondas: la respuesta inicial y, si registra una cita, la confirmación.
-    for (let round = 0; round < 2; round++) {
-      const response = await ai.models.generateContent({ model: MODEL, contents, config })
-      const call = response.functionCalls?.find((entry) => entry.name === bookingTool.name)
-
-      if (!call || round === 1) {
-        const reply = (response.text ?? '').replace(/\*\*/g, '').trim()
-        return NextResponse.json<AssistantReply>({ reply: reply || localAnswer(lastQuestion), booking })
+      if (round.call) {
+        const patientText = turns.filter((turn) => turn.role === 'user').map((turn) => turn.text).join(' ')
+        const result = validateBooking(round.call.args, patientText)
+        if (typeof result !== 'string') {
+          // Cita válida: la confirmación es fija, así se evita una segunda llamada al modelo.
+          emit({ type: 'booking', booking: { ...result, whatsapp: bookingWhatsapp(result) } })
+          if (!wrote) emit({ type: 'text', text: BOOKING_CONFIRMATION })
+          wrote = true
+        } else {
+          // Datos incompletos: el modelo recibe el error y pide lo que falta, con el mismo modelo
+          // porque las firmas de razonamiento son propias de cada uno.
+          contents.push(
+            { role: 'model', parts: round.parts },
+            { role: 'user', parts: [{ functionResponse: { id: round.call.id, name: bookingTool.name, response: { ok: false, error: result } } }] },
+          )
+          const retry = await openStream(ai, contents, config, model)
+          wrote = (await relay(retry.stream, emit)).wrote || wrote
+        }
       }
-
-      const result = validateBooking(call.args)
-      if (typeof result !== 'string') booking = { ...result, whatsapp: bookingWhatsapp(result) }
-
-      // Se devuelve el turno del modelo tal cual (incluye firmas de razonamiento) más el resultado de la función.
-      const modelTurn = response.candidates?.[0]?.content
-      if (modelTurn) contents.push(modelTurn)
-      contents.push({
-        role: 'user',
-        parts: [{
-          functionResponse: {
-            id: call.id,
-            name: bookingTool.name,
-            response: typeof result === 'string'
-              ? { ok: false, error: result }
-              : { ok: true, mensaje: 'Solicitud lista. El paciente debe enviarla por WhatsApp con el botón que ve en pantalla; el equipo confirmará fecha y hora.' },
-          },
-        }],
-      })
+    } catch (error) {
+      console.error('[asistente]', error instanceof ApiError ? `${error.status} ${error.message}` : error)
     }
-  } catch (error) {
-    console.error('[asistente]', error instanceof ApiError ? `${error.status} ${error.message}` : error)
-  }
-
-  return NextResponse.json<AssistantReply>({ reply: localAnswer(lastQuestion), fallback: true })
+    if (!wrote) emit({ type: 'text', text: localAnswer(lastQuestion) })
+  })
 }

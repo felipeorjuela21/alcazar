@@ -11,11 +11,12 @@ export type BookingRequest = {
   comentarios?: string
 }
 
-export type AssistantReply = {
-  reply: string
-  booking?: BookingRequest & { whatsapp: string }
-  fallback?: boolean
-}
+export type Booking = BookingRequest & { whatsapp: string }
+
+// Eventos que el servidor envía al navegador, uno por línea (NDJSON).
+export type AssistantEvent = { type: 'text'; text: string } | { type: 'booking'; booking: Booking }
+
+export const BOOKING_CONFIRMATION = 'Listo, preparé tu solicitud de valoración. El último paso es enviarla por WhatsApp con el botón de abajo; nuestro equipo te confirmará la fecha y hora disponibles.'
 
 // Instrucciones del asistente, construidas solo con información confirmada de la clínica.
 export function buildSystemPrompt(today: string) {
@@ -31,11 +32,11 @@ export function buildSystemPrompt(today: string) {
 
   return `Eres el asistente virtual de ${clinic.legalName}, una clínica de cirugía plástica, medicina estética y bienestar en Armenia, Quindío (Colombia). Hablas con pacientes potenciales en su web.
 
-Tu tono es cálido, sereno y elegante, como la recepción de una clínica de lujo. Respondes en español (o en el idioma del paciente si escribe en otro), con frases cortas: normalmente 2 a 4 oraciones. Escribe texto plano, sin markdown, sin asteriscos ni títulos; si enumeras, usa guiones simples.
+Tu tono es cálido, sereno y elegante, como la recepción de una clínica de lujo. Tutea siempre al paciente (tú, nunca usted). Respondes en español (o en el idioma del paciente si escribe en otro), con frases cortas: normalmente 2 a 4 oraciones. Escribe texto plano, sin markdown, sin asteriscos ni títulos; si enumeras, usa guiones simples.
 
 Tus dos funciones:
 1. Responder dudas sobre la clínica, sus procedimientos, su equipo y la recuperación, usando únicamente la información de abajo.
-2. Ayudar a agendar una valoración: pide de forma natural, de una o dos cosas a la vez, el nombre completo, un teléfono o WhatsApp y el procedimiento de interés; ofrece opcionalmente elegir especialista y una fecha u horario preferido. Cuando tengas al menos nombre, teléfono y procedimiento, confirma los datos en una frase y llama a la función registrar_solicitud_cita. Después de registrarla, explica que el último paso es enviar la solicitud por WhatsApp con el botón que aparece, y que el equipo confirmará fecha y hora disponibles.
+2. Ayudar a agendar una valoración: pide de forma natural, de una o dos cosas a la vez, el nombre completo, un teléfono o WhatsApp y el procedimiento de interés; ofrece opcionalmente elegir especialista y una fecha u horario preferido. Cuando tengas al menos nombre, teléfono y procedimiento (y el paciente haya respondido si quiere especialista o fecha), llama a la función registrar_solicitud_cita sin escribir texto en ese turno: el sitio mostrará la confirmación y el botón para enviarla por WhatsApp. No digas que la solicitud quedó registrada antes de llamar la función. No asignes especialista por tu cuenta: solo llena ese campo si el paciente nombra a uno concreto; si no, déjalo vacío y el equipo lo asignará según el procedimiento.
 
 Límites importantes:
 - No inventes datos. Si algo no está en la información de abajo (precios, horarios de atención, financiación, disponibilidad exacta, número total de cirugías de la clínica, técnicas específicas), dilo con naturalidad y ofrece agendar una valoración o escribir al WhatsApp.
@@ -85,7 +86,7 @@ export function bookingWhatsapp(booking: BookingRequest) {
 
 // Respuesta sin IA: se usa si no hay API key o el servicio no responde.
 export function localAnswer(question: string): string {
-  const normalize = (value: string) => value.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+  const normalize = (value: string) => value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
   const words = normalize(question).split(/\W+/).filter((word) => word.length > 3)
   let best: { score: number; answer: string } = { score: 0, answer: '' }
   for (const faq of faqs) {
