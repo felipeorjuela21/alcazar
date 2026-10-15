@@ -3,3 +3,8 @@ pmOnFail: ignore
 minimumReleaseAgeExclude:
   - '@next/*'
   - next
+
+# Sus scripts de instalación no son necesarios (no-op y aviso de versión).
+allowBuilds:
+  '@google/genai': false
+  protobufjs: false
